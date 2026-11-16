@@ -74,6 +74,18 @@ pub struct WindowsWindowState {
     /// progress and had to be deferred.
     pub force_render_pending: Cell<bool>,
 
+    /// Whether Windows' modal move/size loop is running (`WM_ENTERSIZEMOVE`
+    /// through `WM_EXITSIZEMOVE`). Inside that loop only messages are pumped,
+    /// so each frame drawn here is time the window spends not following the
+    /// pointer (sodam#204).
+    pub size_move_loop: Cell<bool>,
+    /// Set when `WM_SIZE` arrives during the modal loop: the user is resizing,
+    /// where fresh frames are still required.
+    pub size_move_loop_resized: Cell<bool>,
+    /// Set after posting a synthetic `WM_MOUSEMOVE` that cancels the move
+    /// loop's start delay. The synthetic message carries no real pointer
+    /// position, so the next `WM_MOUSEMOVE` must not be dispatched as hover.
+    pub synthetic_mouse_move_pending: Cell<bool>,
     pub click_state: ClickState,
     pub current_cursor: Cell<Option<HCURSOR>>,
     /// Shared with [`WindowsPlatformState::cursor_visible`].
@@ -179,6 +191,9 @@ impl WindowsWindowState {
             last_visibility: Cell::new(None),
             renderer: RefCell::new(renderer),
             force_render_pending: Cell::new(false),
+            size_move_loop: Cell::new(false),
+            size_move_loop_resized: Cell::new(false),
+            synthetic_mouse_move_pending: Cell::new(false),
             click_state,
             current_cursor: Cell::new(current_cursor),
             cursor_visible,

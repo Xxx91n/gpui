@@ -219,6 +219,12 @@ impl WindowsWindowInner {
     }
 
     fn handle_size_msg(self: &Rc<Self>, wparam: WPARAM, lparam: LPARAM) -> Option<isize> {
+        // A size change inside the modal loop means the user is resizing, not
+        // just moving; drawing has to resume for the new layout (sodam#204).
+        if self.state.size_move_loop.get() {
+            self.state.size_move_loop_resized.set(true);
+        }
+
         // Minimizing and restoring both arrive as `WM_SIZE`; the deferred report
         // reads `IsIconic` at delivery, so one call covers both directions.
         self.report_visibility();
@@ -275,6 +281,12 @@ impl WindowsWindowInner {
     }
 
     fn handle_size_move_loop(&self, handle: HWND) -> Option<isize> {
+        // Windows runs a modal loop from here until `WM_EXITSIZEMOVE`. The loop
+        // only pumps messages, so a frame drawn inside it is time the window
+        // spends not following the pointer. Suppress drawing for a pure move; a
+        // resize still needs fresh frames (`handle_size_msg` marks it).
+        self.state.size_move_loop.set(true);
+        self.state.size_move_loop_resized.set(false);
         unsafe {
             let ret = SetTimer(
                 Some(handle),
@@ -293,8 +305,23 @@ impl WindowsWindowInner {
     }
 
     fn handle_size_move_loop_exit(&self, handle: HWND) -> Option<isize> {
+        let drew_nothing =
+            self.state.size_move_loop.get() && !self.state.size_move_loop_resized.get();
+        self.state.size_move_loop.set(false);
+        self.state.size_move_loop_resized.set(false);
+        // The synthetic move cancels the loop's start delay without being
+        // dispatched to this window, so it may still be pending here
+        // (sodam#204). Dropping it now keeps it from eating a real move.
+        self.state.synthetic_mouse_move_pending.set(false);
         unsafe {
             KillTimer(Some(handle), SIZE_MOVE_LOOP_TIMER_ID).log_err();
+            if drew_nothing {
+                // Paint requests were skipped while the window only moved.
+                // Repaint once now so any change made during the drag shows up.
+                RedrawWindow(Some(handle), None, None, RDW_INVALIDATE)
+                    .ok()
+                    .log_err();
+            }
         }
         None
     }
@@ -305,6 +332,9 @@ impl WindowsWindowInner {
             while let Some(Ok(runnable)) = runnables.next() {
                 WindowsDispatcher::execute_runnable(runnable);
             }
+            if self.state.size_move_loop.get() && !self.state.size_move_loop_resized.get() {
+                return Some(0);
+            }
             self.handle_paint_msg(handle)
         } else {
             None
@@ -312,6 +342,14 @@ impl WindowsWindowInner {
     }
 
     fn handle_paint_msg(&self, handle: HWND) -> Option<isize> {
+        if self.state.size_move_loop.get() && !self.state.size_move_loop_resized.get() {
+            // The window is only moving, so its content does not change. Keep
+            // the modal loop free to track the pointer and let the exit handler
+            // request the one repaint that might be needed (sodam#204).
+            // Validating stops WM_PAINT from being re-dispatched in a loop.
+            unsafe { ValidateRect(Some(handle), None).ok().log_err() };
+            return Some(0);
+        }
         self.draw_window(handle, false)
     }
 
@@ -348,6 +386,12 @@ impl WindowsWindowInner {
     }
 
     fn handle_mouse_move_msg(&self, handle: HWND, lparam: LPARAM, wparam: WPARAM) -> Option<isize> {
+        if self.state.synthetic_mouse_move_pending.take() {
+            // This is the move queued by `handle_nc_mouse_down_msg` to start
+            // the modal loop early. It carries no pointer position, so it must
+            // not be dispatched as hover input (sodam#204).
+            return Some(0);
+        }
         self.start_tracking_mouse(handle, TME_LEAVE);
         self.restore_cursor_after_hide();
 
@@ -1178,7 +1222,23 @@ impl WindowsWindowInner {
                 HTMINBUTTON => self.state.nc_button_pressed.set(Some(HTMINBUTTON)),
                 HTMAXBUTTON => self.state.nc_button_pressed.set(Some(HTMAXBUTTON)),
                 HTCLOSE => self.state.nc_button_pressed.set(Some(HTCLOSE)),
-                _ => return None,
+                _ => {
+                    if wparam.0 as u32 == HTCAPTION {
+                        // Letting `DefWindowProc` handle the press is what puts
+                        // the window into the system move loop. That loop waits
+                        // for pointer movement before it starts moving the
+                        // window, which reads as a ~500ms pause (winit PR
+                        // #4136, Flutter #177597). Queueing a synthetic move
+                        // first cancels that wait (sodam#204). The coordinates
+                        // are intentionally 0; winit found that only 0 works.
+                        self.state.synthetic_mouse_move_pending.set(true);
+                        unsafe {
+                            PostMessageW(Some(handle), WM_MOUSEMOVE, WPARAM(0), LPARAM(0))
+                                .log_err();
+                        }
+                    }
+                    return None;
+                }
             };
             Some(0)
         } else {
