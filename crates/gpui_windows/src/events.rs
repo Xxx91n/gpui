@@ -388,6 +388,19 @@ impl WindowsWindowInner {
     }
 
     fn handle_mouse_leave_msg(&self, handle: HWND) -> Option<isize> {
+        // `WM_MOUSELEAVE` also fires when the cursor crosses into the part of
+        // the window that hit-tests as non-client: the app-drawn title bar is
+        // client area that answers `HTCAPTION`. Re-arming `TrackMouseEvent`
+        // here would arm a leave condition the pointer already satisfies, so the
+        // system reposts the leave message immediately and the handler loops at
+        // tens of thousands of messages per second. That loop starves the system
+        // move loop, so a dragged window stops following the pointer and snaps
+        // to the released position (sodam#204). A leave message is only real
+        // when the cursor actually left the window.
+        if Self::cursor_over_window_client(handle).is_some() {
+            return Some(0);
+        }
+
         self.state.hovered.set(false);
         // The next window's `WM_SETCURSOR` picks its own cursor, so we just clear
         // the flag for tight `is_cursor_visible()` semantics.
@@ -398,24 +411,6 @@ impl WindowsWindowInner {
                 .callbacks
                 .hovered_status_change
                 .set(Some(callback));
-        }
-
-        // `WM_MOUSELEAVE` also fires when the cursor moves from the client area
-        // into the non-client area (e.g. the title bar). Before reporting the
-        // exit to the app, verify against the real cursor position that it
-        // actually left the window; otherwise hovering the title bar would
-        // clear hover state and the caption buttons would flash.
-        if Self::cursor_over_window_client(handle).is_some() {
-            // The cursor is physically inside the client area, so the leave
-            // message came from the client/non-client boundary crossing that a
-            // hit test only fakes: the app-drawn title bar is client area that
-            // answers `HTCAPTION`. Arming `TME_NONCLIENT` here would wait for a
-            // leave that the pointer already satisfies, so TrackMouseEvent
-            // reposts the leave message immediately and the pair loops at full
-            // speed (sodam#204: ~37k WM_NCHITTEST/s during a title-bar drag,
-            // starving the system move loop). Rearm the physical condition.
-            self.start_tracking_mouse(handle, TME_LEAVE);
-            return Some(0);
         }
 
         // The cursor left this window, or another window covers it. Re-arming
@@ -1516,17 +1511,21 @@ impl WindowsWindowInner {
     }
 
     fn start_tracking_mouse(&self, handle: HWND, flags: TRACKMOUSEEVENT_FLAGS) {
+        // Arm on every move rather than only on the hover transition: the leave
+        // handler no longer re-arms (doing so looped, see
+        // `handle_mouse_leave_msg`), so a spurious leave would otherwise leave
+        // exit reporting disarmed for good.
+        unsafe {
+            TrackMouseEvent(&mut TRACKMOUSEEVENT {
+                cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
+                dwFlags: flags,
+                hwndTrack: handle,
+                dwHoverTime: HOVER_DEFAULT,
+            })
+            .log_err()
+        };
         if !self.state.hovered.get() {
             self.state.hovered.set(true);
-            unsafe {
-                TrackMouseEvent(&mut TRACKMOUSEEVENT {
-                    cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
-                    dwFlags: flags,
-                    hwndTrack: handle,
-                    dwHoverTime: HOVER_DEFAULT,
-                })
-                .log_err()
-            };
             if let Some(mut callback) = self.state.callbacks.hovered_status_change.take() {
                 callback(true);
                 self.state
