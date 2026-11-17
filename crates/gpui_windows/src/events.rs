@@ -1098,7 +1098,12 @@ impl WindowsWindowInner {
     }
 
     fn handle_nc_mouse_move_msg(&self, handle: HWND, lparam: LPARAM) -> Option<isize> {
-        self.start_tracking_mouse(handle, TME_LEAVE | TME_NONCLIENT);
+        // Arm only the physical client-area leave. The title bar hit-tests as
+        // `HTCAPTION` but sits inside the client rect, so `TME_NONCLIENT` is
+        // already satisfied there and TrackMouseEvent posts a leave immediately
+        // — one spurious leave per mouse move while hovering the title bar
+        // (sodam#204: ~1k `WM_MOUSELEAVE`/s on a high-rate mouse).
+        self.start_tracking_mouse(handle, TME_LEAVE);
         self.restore_cursor_after_hide();
 
         let mut func = self.state.callbacks.input.take()?;
