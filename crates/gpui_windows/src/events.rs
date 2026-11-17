@@ -85,6 +85,7 @@ impl WindowsWindowInner {
         wparam: WPARAM,
         lparam: LPARAM,
     ) -> LRESULT {
+        crate::drag_trace::message(handle, msg, wparam, lparam);
         let handled = match msg {
             // `DefWindowProc` answers `MA_NOACTIVATE` for a left click on `HTCAPTION`.
             // The activation is only triggered when `DefWindowProc` handles the following `WM_NCLBUTTONDOWN`.
@@ -275,6 +276,7 @@ impl WindowsWindowInner {
     }
 
     fn handle_size_move_loop(&self, handle: HWND) -> Option<isize> {
+        crate::drag_trace::set_move_loop(true);
         unsafe {
             let ret = SetTimer(
                 Some(handle),
@@ -293,6 +295,7 @@ impl WindowsWindowInner {
     }
 
     fn handle_size_move_loop_exit(&self, handle: HWND) -> Option<isize> {
+        crate::drag_trace::set_move_loop(false);
         unsafe {
             KillTimer(Some(handle), SIZE_MOVE_LOOP_TIMER_ID).log_err();
         }
@@ -312,7 +315,10 @@ impl WindowsWindowInner {
     }
 
     fn handle_paint_msg(&self, handle: HWND) -> Option<isize> {
-        self.draw_window(handle, false)
+        let started = std::time::Instant::now();
+        let result = self.draw_window(handle, false);
+        crate::drag_trace::paint_finished(handle, started.elapsed().as_millis() as u64);
+        result
     }
 
     fn handle_close_msg(&self) -> Option<isize> {
