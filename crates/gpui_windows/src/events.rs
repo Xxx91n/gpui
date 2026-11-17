@@ -406,18 +406,15 @@ impl WindowsWindowInner {
         // actually left the window; otherwise hovering the title bar would
         // clear hover state and the caption buttons would flash.
         if Self::cursor_over_window_client(handle).is_some() {
-            // The cursor is still over the window. The leave message disarmed
-            // the tracking, so re-arm it; otherwise a fast flick out of the
-            // window from the title bar would never report an exit. Pick the
-            // flags by the region the cursor is actually in, so the armed
-            // condition isn't already satisfied (which would repost the leave
-            // message every time the cursor moves, and re-arm it in a loop).
-            let flags = if Self::cursor_over_client_hit_area(handle) {
-                TME_LEAVE
-            } else {
-                TME_LEAVE | TME_NONCLIENT
-            };
-            self.start_tracking_mouse(handle, flags);
+            // The cursor is physically inside the client area, so the leave
+            // message came from the client/non-client boundary crossing that a
+            // hit test only fakes: the app-drawn title bar is client area that
+            // answers `HTCAPTION`. Arming `TME_NONCLIENT` here would wait for a
+            // leave that the pointer already satisfies, so TrackMouseEvent
+            // reposts the leave message immediately and the pair loops at full
+            // speed (sodam#204: ~37k WM_NCHITTEST/s during a title-bar drag,
+            // starving the system move loop). Rearm the physical condition.
+            self.start_tracking_mouse(handle, TME_LEAVE);
             return Some(0);
         }
 
@@ -473,23 +470,6 @@ impl WindowsWindowInner {
             && cursor_point.y >= client_rect.top
             && cursor_point.y < client_rect.bottom;
         inside.then_some(cursor_point)
-    }
-
-    /// Asks the window where the real cursor currently is, returning whether
-    /// it is over the client area (`HTCLIENT`).
-    fn cursor_over_client_hit_area(handle: HWND) -> bool {
-        let mut cursor_point = POINT { x: 0, y: 0 };
-        if unsafe { GetCursorPos(&mut cursor_point) }.is_err() {
-            // Assume the common case; a wrong guess only re-arms tracking
-            // with one extra flag.
-            return true;
-        }
-        let lparam = LPARAM(
-            (((cursor_point.y as i16 as i32) << 16) | (cursor_point.x as i16 as u16 as i32))
-                as isize,
-        );
-        let hit = unsafe { SendMessageW(handle, WM_NCHITTEST, Some(WPARAM(0)), Some(lparam)) };
-        hit.0 == HTCLIENT as isize
     }
 
     fn handle_syskeyup_msg(&self, wparam: WPARAM, lparam: LPARAM) -> Option<isize> {
