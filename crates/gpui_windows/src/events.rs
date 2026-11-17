@@ -1092,11 +1092,13 @@ impl WindowsWindowInner {
     }
 
     fn handle_nc_mouse_move_msg(&self, handle: HWND, lparam: LPARAM) -> Option<isize> {
-        // Arm only the physical client-area leave. The title bar hit-tests as
-        // `HTCAPTION` but sits inside the client rect, so `TME_NONCLIENT` is
-        // already satisfied there and TrackMouseEvent posts a leave immediately
-        // — one spurious leave per mouse move while hovering the title bar.
-        self.start_tracking_mouse(handle, TME_LEAVE);
+        // Track both boundaries: `TME_LEAVE` covers the client rect, while
+        // `TME_NONCLIENT` covers the non-client area this message came from.
+        // The leave handler tolerates a leave that arrives while the pointer is
+        // still over the window (see `handle_mouse_leave_msg`), so arming both
+        // here no longer starts the re-arm loop that stalled window dragging
+        // (sodam#204), and a direct exit from the title bar is still reported.
+        self.start_tracking_mouse(handle, TME_LEAVE | TME_NONCLIENT);
         self.restore_cursor_after_hide();
 
         let mut func = self.state.callbacks.input.take()?;
